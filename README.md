@@ -8,11 +8,5 @@ Grabs a random comment from https://feedback.wizards.com/forums/918667-mtg-arena
 2. Run the following command to create a `!shuffle` command
 
 ```
-!addcom !shuffler %remoteapi https://mtgtruther.herokuapp.com/truth?mode=text&short=true%
-```
-
-### Dev Notes
-
-```bash
-DATABASE_URL=postgres://postgres@localhost:5432/mtgtruth npm run dev
+!addcom !shuffler %remoteapi https://mtgtruther.fly.dev/truth?mode=text&short=true%
 ```
