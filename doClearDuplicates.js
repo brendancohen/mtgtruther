@@ -6,7 +6,7 @@ module.exports = async function doClearDuplicates() {
   try {
     console.log("Clearing duplicates...");
     const res = await dbClient.query(
-      "DELETE FROM truths a USING truths b WHERE a.id < b.id AND a.body = b.body"
+      "DELETE FROM truths a USING truths b WHERE a.id != b.id AND a.body = b.body"
     );
     console.log(`${res.rowCount} duplicates cleared.`);
   } catch (e) {

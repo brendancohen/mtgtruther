@@ -17,8 +17,8 @@ setInterval(doClearDuplicates, clearDupesInterval);
 app.get("/", (req, res) => res.send("hello"));
 
 app.get("/scrape", async (req, res) => {
-  doScrape();
   res.send('scraping in progress');
+  doScrape();
 });
 
 app.get("/ping", (req, res) => res.send("pong"));
