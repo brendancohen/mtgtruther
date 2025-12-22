@@ -3,105 +3,118 @@ const cheerio = require("cheerio");
 const dbPool = require("./dbPool");
 const pgFormat = require("pg-format");
 
-async function clearDuplicates(dbClient){
-  try {
-    console.log("Clearing duplicates...");
-    const res = await dbClient.query(
-      "DELETE FROM truths WHERE id NOT IN ( SELECT DISTINCT ON (body) id FROM truths ORDER BY body, id);"
-    );
-    console.log(`${res.rowCount} duplicates cleared.`);
-  } catch (e) {
-    dbClient.release();
-    console.error("DB error while clearing duplicates", e);
-    process.exit(-1);
-  }
-}
+// Helper function to add delays between requests
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 module.exports = async function doScrape() {
-const dbClient = await dbPool.connect();
+  const dbClient = await dbPool.connect();
 
   try {
-
+    // Get the highest page number we've scraped
     const queryRes = await dbClient.query(
       "SELECT MAX(page) FROM truths"
     );
+    const lastSyncedPage = queryRes.rows[0]?.max ?? 0;
 
-    //max last page.
-    const lastSyncedPage = queryRes.rows[0]?.max ?? 1;
-    
-    //parse (newMax) from aria-label
+    console.log(`Last synced page: ${lastSyncedPage}`);
+
+    // Fetch page 1 to determine the total number of pages
     const body = await fetch(
       "https://feedback.wizards.com/forums/918667-mtg-arena-bugs-product-suggestions/suggestions/44184111-algorithm-improvement?page=1"
     ).then((res) => res.text());
-    const scrapedComments = [];
+
     const $ = cheerio.load(body);
     const selector = '[aria-label*="Page "]';
     const elements = $(selector);
 
-    newMax = 1;
+    // Find the maximum page number
+    let newMax = 1;
     elements.each((index, element) => {
-      newMax = parseInt($(element).text(),10) > parseInt(newMax,10) ? $(element).text() : newMax
+      const pageNum = parseInt($(element).text(), 10);
+      if (!isNaN(pageNum) && pageNum > newMax) {
+        newMax = pageNum;
+      }
     });
-    console.log(newMax);
-    console.log(lastSyncedPage);
+
+    console.log(`Total pages available: ${newMax}`);
+
+    // ALWAYS scrape page 1 (new comments appear here)
+    console.log(`Scraping page 1 for new comments...`);
+    const scrapedComments = [];
 
     $(".uvListItem .uvUserActionBody .typeset").each((index, el) => {
       scrapedComments.push([$(el).text(), $(el).html(), 1]);
     });
 
-    await dbClient.query(
+    if (scrapedComments.length > 0) {
+      // Use ON CONFLICT to handle duplicates gracefully
+      await dbClient.query(
         pgFormat(
-          "INSERT INTO truths (body, bodyhtml, page) VALUES %L",
+          "INSERT INTO truths (body, bodyhtml, page) VALUES %L ON CONFLICT (body_hash) DO NOTHING",
           scrapedComments
         )
       );
-    
-    console.log(`Done importing page 1.`);
+      console.log(`Processed ${scrapedComments.length} comments from page 1`);
+    }
 
-    //if newMax not equal to lastSynced, parse (newMax-max) additional pages
-    if (newMax != lastSyncedPage) {
-      const difference = parseInt(newMax,10) - parseInt(lastSyncedPage,10)
-      for(i = 1; i<= difference; i++){
+    // If there are NEW pages beyond what we've scraped before, get those too
+    if (newMax > lastSyncedPage) {
+      const startPage = lastSyncedPage + 1;
+      console.log(`New pages detected! Scraping pages ${startPage} to ${newMax}...`);
 
-        const currPage = i+1;
-        const fetchUrl = `https://feedback.wizards.com/forums/918667-mtg-arena-bugs-product-suggestions/suggestions/44184111-algorithm-improvement?page=${currPage}`
-        console.log(fetchUrl)
-        try{
-          const body = await fetch(fetchUrl).then((res) => res.text());
-          const $ = cheerio.load(body);
-          const scrapedComments = [];
-    
-          $(".uvListItem .uvUserActionBody .typeset").each((index, el) => {
-            scrapedComments.push([$(el).text(), $(el).html(), currPage]);
+      for (let currPage = startPage; currPage <= newMax; currPage++) {
+        const fetchUrl = `https://feedback.wizards.com/forums/918667-mtg-arena-bugs-product-suggestions/suggestions/44184111-algorithm-improvement?page=${currPage}`;
+        console.log(`Scraping page ${currPage}...`);
+
+        // Add delay before each request (but not before the first one)
+        if (currPage > startPage) {
+          await sleep(2000);
+        }
+
+        try {
+          const pageBody = await fetch(fetchUrl).then((res) => {
+            if (!res.ok) {
+              throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+            }
+            return res.text();
           });
-          await dbClient.query(
+
+          const $page = cheerio.load(pageBody);
+          const pageComments = [];
+
+          $page(".uvListItem .uvUserActionBody .typeset").each((index, el) => {
+            const bodyText = $page(el).text();
+            const bodyHtml = $page(el).html();
+            pageComments.push([bodyText, bodyHtml, currPage]);
+          });
+
+          if (pageComments.length > 0) {
+            await dbClient.query(
               pgFormat(
-                "INSERT INTO truths (body, bodyhtml, page) VALUES %L",
-                scrapedComments
+                "INSERT INTO truths (body, bodyhtml, page) VALUES %L ON CONFLICT DO NOTHING",
+                pageComments
               )
             );
-          console.log(`Done importing page ${currPage}.`);
-        }catch(e) {
-          console.error(`Failed to fetch page ${currPage}. Status: ${response.status}`);
+            console.log(`Imported ${pageComments.length} comments from page ${currPage}`);
+          } else {
+            console.log(`No comments found on page ${currPage}`);
+          }
+
+        } catch (e) {
+          console.error(`Failed to fetch page ${currPage}. Error: ${e.message}`);
+          // Continue to next page instead of stopping entirely
         }
       }
-
-      await dbClient.query(
-        pgFormat(
-          "UPDATE truths SET page=%L WHERE page=%L",
-          newMax,
-          lastSyncedPage
-        )
-      );
-      
-      console.log(`Updated "page" to ${newMax} where "page" equals ${lastSyncedPage}.`);
+    } else {
+      console.log("No new pages to scrape.");
     }
-    await clearDuplicates(dbClient);
-    console.log("scraping done");
+
+    console.log("Scraping completed successfully");
     dbClient.release();
+
   } catch (e) {
     dbClient.release();
-    console.error("DB error", e);
-    process.exit(-1);
+    console.error("DB error during scraping:", e);
+    throw e; // Re-throw so caller knows it failed
   }
 };
