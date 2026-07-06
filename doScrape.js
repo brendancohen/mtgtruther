@@ -6,10 +6,19 @@ const pgFormat = require("pg-format");
 // Helper function to add delays between requests
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-module.exports = async function doScrape() {
-  const dbClient = await dbPool.connect();
+// Guard against overlapping scrapes (scheduled interval + manual /scrape trigger).
+let scrapeInProgress = false;
 
+module.exports = async function doScrape() {
+  if (scrapeInProgress) {
+    console.log("Scrape already in progress, skipping this run.");
+    return;
+  }
+  scrapeInProgress = true;
+
+  let dbClient;
   try {
+    dbClient = await dbPool.connect();
     // Get the highest page number we've scraped
     const queryRes = await dbClient.query(
       "SELECT MAX(page) FROM truths"
@@ -91,7 +100,7 @@ module.exports = async function doScrape() {
           if (pageComments.length > 0) {
             await dbClient.query(
               pgFormat(
-                "INSERT INTO truths (body, bodyhtml, page) VALUES %L ON CONFLICT DO NOTHING",
+                "INSERT INTO truths (body, bodyhtml, page) VALUES %L ON CONFLICT (body_hash) DO NOTHING",
                 pageComments
               )
             );
@@ -110,11 +119,12 @@ module.exports = async function doScrape() {
     }
 
     console.log("Scraping completed successfully");
-    dbClient.release();
 
   } catch (e) {
-    dbClient.release();
     console.error("DB error during scraping:", e);
     throw e; // Re-throw so caller knows it failed
+  } finally {
+    if (dbClient) dbClient.release();
+    scrapeInProgress = false;
   }
 };

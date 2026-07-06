@@ -7,9 +7,10 @@ const dbPool = new Pool({
       : false,
 });
 
-dbPool.on("error", (err, client) => {
-  console.error("Unexpected error on idle client", err);
-  process.exit(-1);
+// Log idle-client errors but keep the process alive; node-postgres removes the
+// broken client from the pool automatically, so a transient blip shouldn't crash us.
+dbPool.on("error", (err) => {
+  console.error("Unexpected error on idle Postgres client:", err);
 });
 
 module.exports = dbPool;

@@ -14,8 +14,11 @@ GET /truth
 # Get random comment (plain text)
 GET /truth?mode=text
 
-# Get shortened version (250 chars)
+# Get shortened version (500 chars)
 GET /truth?short=true
+
+# Filter by comment length (characters)
+GET /truth?min_length=100&max_length=800
 
 # Combine options
 GET /truth?mode=text&short=true
@@ -33,7 +36,7 @@ GET /search?q=shuffler&mode=text
 GET /search?q=bug&short=true
 ```
 
-**Note:** Search matches whole words only. `?q=test` will match "test" but not "greatest" or "testing".
+**Note:** Search matches whole words only. `?q=test` will match "test" but not "greatest" or "testing". Search scans the full comment body and also accepts `min_length` / `max_length`.
 
 ## Add it to your Twitch Chat
 
@@ -49,3 +52,9 @@ GET /search?q=bug&short=true
 ```
 !addcom !search %remoteapi https://mtgtruther.fly.dev/search?q=%input%&mode=text&short=true%
 ```
+
+## Admin panel
+
+`GET /admin` serves a searchable, sortable web UI over the stored comments, and `GET /scrape` triggers an immediate scrape.
+
+Set the `ADMIN_TOKEN` environment variable to require a shared secret on both routes — pass it as `?token=...` or an `x-admin-token` header. If `ADMIN_TOKEN` is unset, the routes remain publicly accessible.

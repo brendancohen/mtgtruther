@@ -1,10 +1,22 @@
 const express = require("express");
+const cheerio = require("cheerio");
 const dbPool = require("./dbPool");
 const doScrape = require("./doScrape");
 const app = express();
 
 const port = process.env.PORT || 8080;
 const scrapeInterval = 12 * 60 * 60 * 1000;
+
+// Optional shared-secret protecting the admin UI and manual scrape trigger.
+// If unset, those routes stay open (backward compatible with the original behavior).
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
+
+function requireAuth(req, res, next) {
+  if (!ADMIN_TOKEN) return next();
+  const provided = req.query.token || req.get("x-admin-token");
+  if (provided === ADMIN_TOKEN) return next();
+  return res.status(401).send("Unauthorized");
+}
 
 // ============================================================================
 // HELPERS
@@ -20,6 +32,15 @@ function escapeHtml(text) {
     .replace(/'/g, '&#039;');
 }
 
+// Escape for HTML, then wrap case-insensitive matches of `term` for the admin UI.
+function highlightMatch(text, term) {
+  const escaped = escapeHtml(text);
+  if (!term) return escaped;
+  const escapedTerm = escapeHtml(term).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!escapedTerm) return escaped;
+  return escaped.replace(new RegExp(escapedTerm, "gi"), (m) => `<span class="highlight">${m}</span>`);
+}
+
 function parseLengthFilters(req) {
   const minLength = parseInt(req.query.min_length) || 1;
   const maxLength = parseInt(req.query.max_length) || 999999;
@@ -29,22 +50,28 @@ function parseLengthFilters(req) {
 function formatComment(selectedRow, req) {
   if (!selectedRow) return "";
 
-  let comment = req.query.mode === "text"
-    ? selectedRow.body
-    : selectedRow.bodyhtml;
+  const isText = req.query.mode === "text";
+  let comment = isText ? selectedRow.body : selectedRow.bodyhtml;
 
-  if (req.query.short === "true") {
-    comment = comment.slice(0, 250);
+  if (req.query.short === "true" && comment) {
+    if (isText) {
+      comment = comment.slice(0, 500);
+    } else {
+      // Truncate HTML at 500 chars, then let cheerio drop any dangling partial
+      // tag and re-balance so we never emit broken markup.
+      const sliced = comment.slice(0, 500).replace(/<[^>]*$/, "");
+      comment = cheerio.load(sliced, null, false).html();
+    }
   }
 
   return comment;
 }
 
 function withDbClient(handler) {
-  return async (req, res) => {  // Remove the extra 'async' wrapper
+  return async (req, res) => {
     const dbClient = await dbPool.connect();
     try {
-      await handler(req, res, dbClient);
+      return await handler(req, res, dbClient);
     } catch (e) {
       console.error('Request error:', e);
       res.status(500).send(e.message);
@@ -62,13 +89,15 @@ app.get("/", (req, res) => res.send("MTG Truther API"));
 
 app.get("/ping", (req, res) => res.send("pong"));
 
-app.get("/scrape", async (req, res) => {
+app.get("/scrape", requireAuth, async (req, res) => {
   res.send('Scraping in progress');
   doScrape().catch(err => console.error('Scrape failed:', err));
 });
 
 app.get("/truth", withDbClient(async (req, res, dbClient) => {
   const { minLength, maxLength } = parseLengthFilters(req);
+  
+  console.log("Fetching random truth.");
 
   const queryRes = await dbClient.query(
     "SELECT * FROM truths WHERE LENGTH(body) >= $1 AND LENGTH(body) <= $2 ORDER BY RANDOM() LIMIT 1",
@@ -76,11 +105,16 @@ app.get("/truth", withDbClient(async (req, res, dbClient) => {
   );
 
   const comment = formatComment(queryRes.rows[0], req);
+
+  console.log("Sending random truth: ", comment);
+
   res.send(comment);
 }));
 
 app.get("/search", withDbClient(async (req, res, dbClient) => {
   const searchTerm = req.query.q;
+  
+  console.log(`Searching for term: ${searchTerm}`);
 
   if (!searchTerm) {
     return res.status(400).send("Missing search term. Use ?q=yourterm");
@@ -94,6 +128,9 @@ app.get("/search", withDbClient(async (req, res, dbClient) => {
   );
 
   const comment = formatComment(queryRes.rows[0], req);
+
+  console.log(`Sending search result for term: ${searchTerm}: `, comment);
+
   res.send(comment);
 }));
 
@@ -152,7 +189,7 @@ app.get("/stats", withDbClient(async (req, res, dbClient) => {
   res.json(stats);
 }));
 
-app.get("/admin", withDbClient(async (req, res, dbClient) => {
+app.get("/admin", requireAuth, withDbClient(async (req, res, dbClient) => {
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 50;
   const offset = (page - 1) * limit;
@@ -460,7 +497,7 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
         ` : rows.map(row => `
           <tr>
             <td class="id-col">${row.id}</td>
-            <td class="body-preview">${escapeHtml(row.body_preview)}${row.body_length > 200 ? '...' : ''}</td>
+            <td class="body-preview">${highlightMatch(row.body_preview, search)}${row.body_length > 200 ? '...' : ''}</td>
             <td class="length-col">${row.body_length}</td>
             <td class="page-col">${row.page || '-'}</td>
           </tr>
@@ -493,7 +530,14 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
 // STARTUP
 // ============================================================================
 
-// Auto-scrape every 12 hours
-setInterval(doScrape, scrapeInterval);
+// Auto-scrape every 12 hours. Note: on a scale-to-zero host the machine may be
+// suspended when this would fire, so treat scheduling as best-effort.
+setInterval(() => {
+  doScrape().catch(err => console.error("Scheduled scrape failed:", err));
+}, scrapeInterval);
+
+if (!ADMIN_TOKEN) {
+  console.warn("ADMIN_TOKEN is not set — /admin and /scrape are publicly accessible.");
+}
 
 app.listen(port, () => console.log(`MTG Truther listening on port ${port}`));
