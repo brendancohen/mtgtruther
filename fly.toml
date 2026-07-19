@@ -19,6 +19,16 @@ primary_region = "ewr"
   min_machines_running = 0
   processes = ["app"]
 
+# Catches deploys where the app boots but crashes (e.g. a dependency that the
+# image's Node version can't load). /ping needs no database, so a failure here
+# means the process itself is unhealthy.
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "30s"
+  timeout = "5s"
+  method = "GET"
+  path = "/ping"
+
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
