@@ -1,7 +1,8 @@
 # syntax = docker/dockerfile:1
 
-# Adjust NODE_VERSION as desired
-ARG NODE_VERSION=18.16.0
+# Adjust NODE_VERSION as desired.
+# Must stay >= 20.18.1: cheerio 1.x and undici require it.
+ARG NODE_VERSION=22.12.0
 FROM node:${NODE_VERSION}-slim as base
 
 LABEL fly_launch_runtime="NodeJS"
