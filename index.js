@@ -2,6 +2,7 @@ const express = require("express");
 const cheerio = require("cheerio");
 const dbPool = require("./dbPool");
 const doScrape = require("./doScrape");
+const { censorText, censorHtml, isProfane } = require("./censor");
 const app = express();
 
 const port = process.env.PORT || 8080;
@@ -52,6 +53,9 @@ function formatComment(selectedRow, req) {
 
   const isText = req.query.mode === "text";
   let comment = isText ? selectedRow.body : selectedRow.bodyhtml;
+
+  // Censor before truncating; the source forum's profanity filter lets plenty through.
+  comment = isText ? censorText(comment) : censorHtml(comment);
 
   if (req.query.short === "true" && comment) {
     if (isText) {
@@ -179,10 +183,12 @@ app.get("/stats", withDbClient(async (req, res, dbClient) => {
       page: r.page,
       count: parseInt(r.count)
     })),
-    most_common_words: wordsRes.rows.map(r => ({
-      word: r.word,
-      frequency: parseInt(r.frequency)
-    })),
+    most_common_words: wordsRes.rows
+      .filter(r => !isProfane(r.word))
+      .map(r => ({
+        word: r.word,
+        frequency: parseInt(r.frequency)
+      })),
     last_scraped_page: lastScrapeRes.rows[0].last_page
   };
 
@@ -497,7 +503,7 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
         ` : rows.map(row => `
           <tr>
             <td class="id-col">${row.id}</td>
-            <td class="body-preview">${highlightMatch(row.body_preview, search)}${row.body_length > 200 ? '...' : ''}</td>
+            <td class="body-preview">${highlightMatch(censorText(row.body_preview), search)}${row.body_length > 200 ? '...' : ''}</td>
             <td class="length-col">${row.body_length}</td>
             <td class="page-col">${row.page || '-'}</td>
           </tr>

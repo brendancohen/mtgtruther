@@ -53,6 +53,14 @@ GET /search?q=bug&short=true
 !addcom !search %remoteapi https://mtgtruther.fly.dev/search?q=%input%&mode=text&short=true%
 ```
 
+## Profanity filtering
+
+The source forum's own filter is permissive, so comments are censored at serve time: flagged words are masked with asterisks in `/truth`, `/search` and the admin previews, and excluded from the `/stats` word list.
+
+The word list is not kept in this repo. Matching combines two published dictionaries pulled in as dependencies: [`obscenity`](https://www.npmjs.com/package/obscenity) is the engine (its curated whitelist is what keeps ordinary words like *class* or *scrape* from being flagged, and it also handles common character substitutions), and any terms it misses are filled in from the [`naughty-words`](https://www.npmjs.com/package/naughty-words) list, anchored at word boundaries. See [censor.js](censor.js).
+
+Masking applies to the API response only — originals are stored unmodified in the database — and it masks words, not surrounding context.
+
 ## Admin panel
 
 `GET /admin` serves a searchable, sortable web UI over the stored comments, and `GET /scrape` triggers an immediate scrape.
