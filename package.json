@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
+    "deploy": "flyctl deploy && node scripts/sync-steam-scraper.js",
     "scrape:steam": "node steamScrape.js",
+    "sync:steam-scraper": "node scripts/sync-steam-scraper.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",

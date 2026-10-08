@@ -20,6 +20,20 @@ const { censorText } = require("./censor");
 const APP_ID = 2141910;
 const FORUM = `https://steamcommunity.com/app/${APP_ID}/discussions`;
 const QUERIES = ["shuffler", "rigged", "shuffle", "mana screw", "land flood"];
+// Threads behind the reviewed Oct 2026 corpus. Always re-checked for new replies,
+// so a run still works when Steam rate-limits search; search only adds to these.
+const KNOWN_THREADS = [
+  "585062169816657640", "585062169816636720", "585061535403188446", "585061437343349696",
+  "585062169816719140", "585062169816664430", "585062169816670496", "585062169816646961",
+  "585061805381928608", "585061437343366927", "585061900941920319", "585061535403185899",
+  "655982159561262238", "734783198674908172", "585060903247201917", "4633734370401714236",
+  "585061197374805353", "597396774047475805", "686367559407216959", "838375260162265030",
+  "599643178892601245", "585060903247113929", "3818544693879134425", "585060903247102481",
+  "762932162500697367", "585061535403130393",
+];
+// This many thread pages failing in a row means Steam is rate-limiting this
+// machine, so the run gives up rather than backing off for an hour.
+const MAX_CONSECUTIVE_FAILURES = 3;
 const SEARCH_PAGES = 3;
 const MAX_THREAD_PAGES = 20;
 const MAX_RETRIES = 3;
@@ -110,7 +124,8 @@ function classify(text) {
 }
 
 async function discoverThreads() {
-  const threads = new Set();
+  const threads = new Set(KNOWN_THREADS);
+  // Returns the number of thread links on a search page, or null if it failed.
   const collectLinks = async (url) => {
     try {
       const $ = await getPage(url);
@@ -125,7 +140,7 @@ async function discoverThreads() {
       return found;
     } catch (e) {
       console.error(`Discovery page failed: ${e.message}`);
-      return 0;
+      return null;
     } finally {
       await sleep(DELAY_MS);
     }
@@ -134,6 +149,10 @@ async function discoverThreads() {
   for (const query of QUERIES) {
     for (let page = 1; page <= SEARCH_PAGES; page++) {
       const found = await collectLinks(`${FORUM}/search/?q=${encodeURIComponent(query)}&gidforum=0&p=${page}`);
+      if (found === null) {
+        console.log(`Search unavailable; continuing with ${threads.size} known threads.`);
+        return [...threads];
+      }
       if (found === 0) break;
     }
   }
@@ -188,6 +207,7 @@ async function collect() {
   const seen = new Set();
   let raw = 0;
   let failed = 0;
+  let consecutiveFailures = 0;
 
   for (const [i, threadId] of threadIds.entries()) {
     try {
@@ -201,10 +221,15 @@ async function collect() {
         if (reason) dropped.push({ ...entry, reason });
         else kept.push(entry);
       }
+      consecutiveFailures = 0;
       console.log(`[${i + 1}/${threadIds.length}] ${posts.length} posts — ${title.slice(0, 60)}`);
     } catch (e) {
       failed++;
+      consecutiveFailures++;
       console.error(`Thread ${threadId} failed: ${e.message}`);
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        throw new Error(`${consecutiveFailures} threads failed in a row; Steam is likely rate-limiting this machine. Inserted nothing.`);
+      }
     }
   }
 

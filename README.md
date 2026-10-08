@@ -9,15 +9,23 @@ Serves random comments about the MTG Arena shuffler algorithm.
 
 ### Collecting from Steam
 
-Ingestion is a manual, reviewed process rather than a background job:
+A scheduled Fly Machine named `steam-scraper` runs `node steamScrape.js --auto` once a week. Each run searches the forum for shuffler threads, scrapes them, strips quoted replies, and inserts posts that touch the shuffler/rigging theme and aren't already stored (banter and decklists are dropped). Guardrails:
+
+- If a run would add more than 100 new posts (`STEAM_MAX_NEW`), it inserts nothing and fails — that volume means a Steam layout change or a filter problem, not real activity.
+- It fails loudly if discovery or scraping comes back empty, retries rate limits with backoff, and never restarts itself after a failure.
+- Each run logs one summary line with the id range it inserted: `flyctl logs -a mtgtruther -i <machine id>` (`flyctl machine list -a mtgtruther` shows the id).
+
+**Deploy with `npm run deploy`, not a bare `flyctl deploy`.** `fly deploy` doesn't update the scheduled Machine, so the script then points it at the new image (and recreates it if it's missing) via `scripts/sync-steam-scraper.js`.
+
+Manual tools, for reviewing or tuning the filter:
 
 ```bash
-npm run scrape:steam                    # scrape and write steam-review.md / .json for review
-node steamScrape.js --reclassify        # re-run the filter over the cached scrape after tuning
+npm run scrape:steam                    # dry run: scrape and write steam-review.md / .json
+node steamScrape.js --reclassify        # re-run the filter over the cached scrape
 node steamScrape.js --insert            # insert exactly the reviewed set (needs DATABASE_URL)
 ```
 
-Quoted replies are stripped, and posts are kept only if they touch the shuffler/rigging theme and aren't banter or decklists. The review files contain raw comments and are git-ignored. To back out every Steam comment: `DELETE FROM truths WHERE source = 'steam';`
+The review files contain raw comments and are git-ignored. To back out Steam comments: `DELETE FROM truths WHERE source = 'steam';` — or one run's batch with `AND id BETWEEN <first> AND <last>` from its log line.
 
 ## API Endpoints
 
