@@ -1,8 +1,16 @@
 # MTG Truther
 
-Grabs random comments from the MTG Arena feedback forum about the shuffler algorithm.
+Serves random comments from the MTG Arena feedback forum about the shuffler algorithm.
 
-Source: https://feedback.wizards.com/forums/918667-mtg-arena-bugs-product-suggestions/suggestions/44184111-algorithm-improvement
+Original source: https://feedback.wizards.com/forums/918667-mtg-arena-bugs-product-suggestions/suggestions/44184111-algorithm-improvement
+
+> **Source archived (Oct 2026).** Wizards moved the MTG Arena feedback forum into a
+> private, sign-in-only archive, so the original thread can no longer be scraped. The
+> API keeps serving the comments already captured in the database — the corpus is now
+> **frozen**, and that database is the only remaining copy. Scraping is retired: the
+> `/scrape` endpoint is a no-op and the 12-hour auto-scrape has been removed.
+> `doScrape.js` is kept for reference in case the scraper is ever repointed at a live
+> source (e.g. Reddit's r/MagicArena via its API, or the Steam Community forums).
 
 ## API Endpoints
 
@@ -63,6 +71,6 @@ Masking applies to the API response only — originals are stored unmodified in 
 
 ## Admin panel
 
-`GET /admin` serves a searchable, sortable web UI over the stored comments, and `GET /scrape` triggers an immediate scrape.
+`GET /admin` serves a searchable, sortable web UI over the stored comments. (`GET /scrape` is retired — see the note at the top — and now returns `410 Gone`.)
 
-Set the `ADMIN_TOKEN` environment variable to require a shared secret on both routes — pass it as `?token=...` or an `x-admin-token` header. If `ADMIN_TOKEN` is unset, the routes remain publicly accessible.
+Set the `ADMIN_TOKEN` environment variable to require a shared secret on `/admin` — pass it as `?token=...` or an `x-admin-token` header. If `ADMIN_TOKEN` is unset, the route remains publicly accessible.

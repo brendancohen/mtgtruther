@@ -1,12 +1,10 @@
 const express = require("express");
 const cheerio = require("cheerio");
 const dbPool = require("./dbPool");
-const doScrape = require("./doScrape");
 const { censorText, censorHtml, isProfane } = require("./censor");
 const app = express();
 
 const port = process.env.PORT || 8080;
-const scrapeInterval = 12 * 60 * 60 * 1000;
 
 // Optional shared-secret protecting the admin UI and manual scrape trigger.
 // If unset, those routes stay open (backward compatible with the original behavior).
@@ -93,9 +91,13 @@ app.get("/", (req, res) => res.send("MTG Truther API"));
 
 app.get("/ping", (req, res) => res.send("pong"));
 
-app.get("/scrape", requireAuth, async (req, res) => {
-  res.send('Scraping in progress');
-  doScrape().catch(err => console.error('Scrape failed:', err));
+// Scraping is retired: the source feedback forum was archived and locked behind
+// sign-in in Oct 2026, so there is nothing left to fetch. Kept as a no-op so any
+// existing caller gets a clear answer rather than a 404.
+app.get("/scrape", (req, res) => {
+  res
+    .status(410)
+    .send("Scraping disabled: the source forum was archived (Oct 2026). The existing corpus is still served via /truth and /search.");
 });
 
 app.get("/truth", withDbClient(async (req, res, dbClient) => {
@@ -536,14 +538,13 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
 // STARTUP
 // ============================================================================
 
-// Auto-scrape every 12 hours. Note: on a scale-to-zero host the machine may be
-// suspended when this would fire, so treat scheduling as best-effort.
-setInterval(() => {
-  doScrape().catch(err => console.error("Scheduled scrape failed:", err));
-}, scrapeInterval);
+// Scraping is retired: the upstream feedback forum was archived and locked behind
+// sign-in in Oct 2026, so there are no new comments to fetch. The existing corpus
+// is still served from the database. doScrape.js is left in the repo as reference
+// in case the scraper is ever repointed at a new source (see README).
 
 if (!ADMIN_TOKEN) {
-  console.warn("ADMIN_TOKEN is not set — /admin and /scrape are publicly accessible.");
+  console.warn("ADMIN_TOKEN is not set — /admin is publicly accessible.");
 }
 
 app.listen(port, () => console.log(`MTG Truther listening on port ${port}`));
