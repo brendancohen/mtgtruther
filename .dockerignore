@@ -7,3 +7,4 @@ node_modules
 # raw scrape review output
 steam-review.json
 steam-review.md
+steam-new-posts.md

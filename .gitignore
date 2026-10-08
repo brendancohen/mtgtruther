@@ -117,3 +117,4 @@ dist
 # Steam scraper review output (contains raw, uncensored comments)
 steam-review.json
 steam-review.md
+steam-new-posts.md

@@ -13,7 +13,6 @@
 
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
 const cheerio = require("cheerio");
 const pgFormat = require("pg-format");
 const { censorText } = require("./censor");
@@ -22,13 +21,11 @@ const APP_ID = 2141910;
 const FORUM = `https://steamcommunity.com/app/${APP_ID}/discussions`;
 const QUERIES = ["shuffler", "rigged", "shuffle", "mana screw", "land flood"];
 const SEARCH_PAGES = 3;
-// Search ranks by relevance, so also sweep the most recently active topics to
-// catch new threads; the per-post filter decides what's on-theme.
-const RECENT_PAGES = 2;
 const MAX_THREAD_PAGES = 20;
+const MAX_RETRIES = 3;
 // More new posts than this in one unattended run suggests a broken filter or a
 // Steam layout change rather than real activity, so --auto inserts nothing.
-const MAX_NEW_PER_RUN = Number(process.env.STEAM_MAX_NEW) || 100;
+const MAX_NEW_PER_RUN = process.env.STEAM_MAX_NEW ? Number(process.env.STEAM_MAX_NEW) : 100;
 const DELAY_MS = 1500;
 const UA = "mtgtruther/0.2 (+https://github.com/brendancohen/mtgtruther)";
 
@@ -50,10 +47,22 @@ const THEME = new RegExp(
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Fetch and parse a page, backing off when Steam rate-limits (429) or has a
+// transient server error, honouring Retry-After when it's given.
 async function getPage(url) {
-  const res = await fetch(url, { headers: { "User-Agent": UA } });
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  return cheerio.load(await res.text());
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, { headers: { "User-Agent": UA } });
+    if (res.ok) return cheerio.load(await res.text());
+
+    const retryable = res.status === 429 || res.status >= 500;
+    if (!retryable || attempt >= MAX_RETRIES) {
+      throw new Error(`HTTP ${res.status} for ${url}`);
+    }
+    const retryAfter = Number(res.headers.get("retry-after"));
+    const waitMs = retryAfter > 0 ? retryAfter * 1000 : 30000 * 2 ** attempt;
+    console.log(`HTTP ${res.status}; retrying in ${Math.round(waitMs / 1000)}s: ${url}`);
+    await sleep(waitMs);
+  }
 }
 
 function escapeHtml(text) {
@@ -127,9 +136,6 @@ async function discoverThreads() {
       const found = await collectLinks(`${FORUM}/search/?q=${encodeURIComponent(query)}&gidforum=0&p=${page}`);
       if (found === 0) break;
     }
-  }
-  for (let page = 1; page <= RECENT_PAGES; page++) {
-    await collectLinks(`${FORUM}/0/?fp=${page}`);
   }
   return [...threads];
 }
@@ -224,20 +230,25 @@ async function auto() {
   try {
     await ensureSourceColumn(client);
 
-    // body_hash is md5(body) in Postgres, which hashes the same UTF-8 bytes as this.
-    const hashes = kept.map((k) => crypto.createHash("md5").update(k.text).digest("hex"));
-    const { rows } = await client.query("SELECT body_hash FROM truths WHERE body_hash = ANY($1)", [hashes]);
-    const existing = new Set(rows.map((r) => r.body_hash));
-    const fresh = kept.filter((_, i) => !existing.has(hashes[i]));
-
-    if (fresh.length > MAX_NEW_PER_RUN) {
-      throw new Error(
-        `${fresh.length} new posts exceeds the per-run limit of ${MAX_NEW_PER_RUN}; inserted nothing. ` +
-          "Review with a dry run, or raise STEAM_MAX_NEW for a one-off catch-up."
-      );
+    // Let the table's own unique constraint decide what's new, rather than
+    // recomputing body_hash here: insert everything inside a transaction and roll
+    // back if the batch is implausibly large.
+    await client.query("BEGIN");
+    let ids;
+    try {
+      ids = await insertRows(client, kept);
+      if (ids.length > MAX_NEW_PER_RUN) {
+        throw new Error(
+          `${ids.length} new posts exceeds the per-run limit of ${MAX_NEW_PER_RUN}; inserted nothing. ` +
+            "Review with a dry run, or raise STEAM_MAX_NEW for a one-off catch-up."
+        );
+      }
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
     }
 
-    const ids = await insertRows(client, fresh);
     const range = ids.length ? `, ids ${Math.min(...ids)}-${Math.max(...ids)}` : "";
     console.log(
       `Steam auto run: ${stats.threads} threads (${stats.failed} failed), ${stats.raw} posts, ` +
@@ -352,15 +363,19 @@ async function insertRows(client, entries) {
   return ids;
 }
 
-const mode = process.argv.includes("--auto")
-  ? auto
-  : process.argv.includes("--insert")
-    ? insert
-    : process.argv.includes("--reclassify")
-      ? async () => reclassify()
-      : dryRun;
+if (require.main === module) {
+  const mode = process.argv.includes("--auto")
+    ? auto
+    : process.argv.includes("--insert")
+      ? insert
+      : process.argv.includes("--reclassify")
+        ? async () => reclassify()
+        : dryRun;
 
-mode().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+  mode().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}
+
+module.exports = { classify, insertRows, ensureSourceColumn };
