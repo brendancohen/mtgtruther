@@ -91,13 +91,14 @@ app.get("/", (req, res) => res.send("MTG Truther API"));
 
 app.get("/ping", (req, res) => res.send("pong"));
 
-// Scraping is retired: the source feedback forum was archived and locked behind
-// sign-in in Oct 2026, so there is nothing left to fetch. Kept as a no-op so any
-// existing caller gets a clear answer rather than a 404.
+// Automatic scraping is retired: the original feedback forum was archived and
+// locked behind sign-in in Oct 2026. New comments are now collected offline with
+// steamScrape.js (review, then insert). Kept as a no-op so any existing caller
+// gets a clear answer rather than a 404.
 app.get("/scrape", (req, res) => {
   res
     .status(410)
-    .send("Scraping disabled: the source forum was archived (Oct 2026). The existing corpus is still served via /truth and /search.");
+    .send("On-demand scraping is disabled; the corpus is updated offline. Comments are still served via /truth and /search.");
 });
 
 app.get("/truth", withDbClient(async (req, res, dbClient) => {
@@ -537,11 +538,6 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
 // ============================================================================
 // STARTUP
 // ============================================================================
-
-// Scraping is retired: the upstream feedback forum was archived and locked behind
-// sign-in in Oct 2026, so there are no new comments to fetch. The existing corpus
-// is still served from the database. doScrape.js is left in the repo as reference
-// in case the scraper is ever repointed at a new source (see README).
 
 if (!ADMIN_TOKEN) {
   console.warn("ADMIN_TOKEN is not set — /admin is publicly accessible.");

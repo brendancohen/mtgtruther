@@ -1,16 +1,23 @@
 # MTG Truther
 
-Serves random comments from the MTG Arena feedback forum about the shuffler algorithm.
+Serves random comments about the MTG Arena shuffler algorithm.
 
-Original source: https://feedback.wizards.com/forums/918667-mtg-arena-bugs-product-suggestions/suggestions/44184111-algorithm-improvement
+## Sources
 
-> **Source archived (Oct 2026).** Wizards moved the MTG Arena feedback forum into a
-> private, sign-in-only archive, so the original thread can no longer be scraped. The
-> API keeps serving the comments already captured in the database — the corpus is now
-> **frozen**, and that database is the only remaining copy. Scraping is retired: the
-> `/scrape` endpoint is a no-op and the 12-hour auto-scrape has been removed.
-> `doScrape.js` is kept for reference in case the scraper is ever repointed at a live
-> source (e.g. Reddit's r/MagicArena via its API, or the Steam Community forums).
+- **MTG Arena feedback forum** (original) — the [algorithm improvement](https://feedback.wizards.com/forums/918667-mtg-arena-bugs-product-suggestions/suggestions/44184111-algorithm-improvement) thread. Wizards moved the forum into a private, sign-in-only archive in Oct 2026, so it can no longer be scraped; the comments captured before then live only in the database.
+- **Steam Community** — shuffler-themed posts from the [MTG Arena discussions](https://steamcommunity.com/app/2141910/discussions/), collected with `steamScrape.js` and tagged `source = 'steam'`.
+
+### Collecting from Steam
+
+Ingestion is a manual, reviewed process rather than a background job:
+
+```bash
+npm run scrape:steam                    # scrape and write steam-review.md / .json for review
+node steamScrape.js --reclassify        # re-run the filter over the cached scrape after tuning
+node steamScrape.js --insert            # insert exactly the reviewed set (needs DATABASE_URL)
+```
+
+Quoted replies are stripped, and posts are kept only if they touch the shuffler/rigging theme and aren't banter or decklists. The review files contain raw comments and are git-ignored. To back out every Steam comment: `DELETE FROM truths WHERE source = 'steam';`
 
 ## API Endpoints
 
@@ -63,7 +70,7 @@ GET /search?q=bug&short=true
 
 ## Profanity filtering
 
-The source forum's own filter is permissive, so comments are censored at serve time: flagged words are masked with asterisks in `/truth`, `/search` and the admin previews, and excluded from the `/stats` word list.
+Neither source forum filters much, so comments are censored at serve time: flagged words are masked with asterisks in `/truth`, `/search` and the admin previews, and excluded from the `/stats` word list.
 
 The word list is not kept in this repo. Matching combines two published dictionaries pulled in as dependencies: [`obscenity`](https://www.npmjs.com/package/obscenity) is the engine (its curated whitelist is what keeps ordinary words like *class* or *scrape* from being flagged, and it also handles common character substitutions), and any terms it misses are filled in from the [`naughty-words`](https://www.npmjs.com/package/naughty-words) list, anchored at word boundaries. See [censor.js](censor.js).
 
@@ -71,6 +78,6 @@ Masking applies to the API response only — originals are stored unmodified in 
 
 ## Admin panel
 
-`GET /admin` serves a searchable, sortable web UI over the stored comments. (`GET /scrape` is retired — see the note at the top — and now returns `410 Gone`.)
+`GET /admin` serves a searchable, sortable web UI over the stored comments. (`GET /scrape` is retired and returns `410 Gone`; see [Collecting from Steam](#collecting-from-steam).)
 
 Set the `ADMIN_TOKEN` environment variable to require a shared secret on `/admin` — pass it as `?token=...` or an `x-admin-token` header. If `ADMIN_TOKEN` is unset, the route remains publicly accessible.

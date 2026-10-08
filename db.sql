@@ -8,7 +8,8 @@ create table if not exists truths (
   body text not null,
   bodyhtml text,
   page int,
-  body_hash text generated always as (md5(body)) stored
+  body_hash text generated always as (md5(body)) stored,
+  source text  -- null for the original feedback forum, 'steam' for steamScrape.js
 );
 
 create unique index if not exists truths_body_hash_key on truths (body_hash);
@@ -19,3 +20,8 @@ create unique index if not exists truths_body_hash_key on truths (body_hash);
 --   ALTER TABLE truths
 --     ADD COLUMN body_hash text GENERATED ALWAYS AS (md5(body)) STORED;
 --   CREATE UNIQUE INDEX truths_body_hash_key ON truths (body_hash);
+--
+-- Adding `source` to an existing table must be done by the table owner (the app
+-- role usually can't ALTER):
+--
+--   ALTER TABLE truths ADD COLUMN source text;

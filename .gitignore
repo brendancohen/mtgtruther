@@ -114,3 +114,6 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+# Steam scraper review output (contains raw, uncensored comments)
+steam-review.json
+steam-review.md
