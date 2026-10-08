@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js",
+    "dev": "node --watch index.js",
     "scrape:steam": "node steamScrape.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -15,12 +15,8 @@
     "cheerio": "^1.0.0-rc.5",
     "express": "^4.17.1",
     "naughty-words": "^1.2.0",
-    "node-fetch": "^2.6.1",
     "obscenity": "^0.4.6",
     "pg": "^8.5.1",
     "pg-format": "^1.0.4"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.14"
   }
 }

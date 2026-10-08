@@ -11,7 +11,6 @@
 
 const fs = require("fs");
 const path = require("path");
-const fetch = require("node-fetch");
 const cheerio = require("cheerio");
 const pgFormat = require("pg-format");
 const { censorText } = require("./censor");
