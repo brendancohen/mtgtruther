@@ -15,7 +15,9 @@ create table if not exists truths (
   bodyhtml text,
   page int,
   body_hash text generated always as (md5(regexp_replace(trim(both from body), '\s+', ' ', 'g'))) stored,
-  source text  -- null for the original feedback forum, 'steam' for steamScrape.js
+  source text,  -- null for the original feedback forum, 'steam' for steamScrape.js
+  hidden boolean not null default false,  -- kept for dedup, never served
+  hidden_reason text
 );
 
 create unique index if not exists idx_truths_body_hash on truths (body_hash);
@@ -24,3 +26,7 @@ create unique index if not exists idx_truths_body_hash on truths (body_hash);
 -- role usually can't ALTER):
 --
 --   ALTER TABLE truths ADD COLUMN source text;
+
+-- Adding moderation columns to an existing table (owner only):
+--
+--   ALTER TABLE truths ADD COLUMN hidden boolean NOT NULL DEFAULT false, ADD COLUMN hidden_reason text;

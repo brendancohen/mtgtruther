@@ -44,6 +44,10 @@ function highlightMatch(text, term) {
 // scrape and 'steam' for steamScrape.js. Keys double as the admin filter values.
 const SOURCE_LABELS = { arena: "Arena forum", steam: "Steam" };
 
+// Hidden comments stay in the table (so re-scrapes still dedupe against them) but
+// are never served. The admin page can list either set or both.
+const VISIBILITY_LABELS = { all: "All comments", visible: "In rotation", hidden: "Hidden" };
+
 function sourceKey(row) {
   return row.source || "arena";
 }
@@ -115,7 +119,7 @@ app.get("/truth", withDbClient(async (req, res, dbClient) => {
   console.log("Fetching random truth.");
 
   const queryRes = await dbClient.query(
-    "SELECT * FROM truths WHERE LENGTH(body) >= $1 AND LENGTH(body) <= $2 ORDER BY RANDOM() LIMIT 1",
+    "SELECT * FROM truths WHERE NOT hidden AND LENGTH(body) >= $1 AND LENGTH(body) <= $2 ORDER BY RANDOM() LIMIT 1",
     [minLength, maxLength]
   );
 
@@ -138,7 +142,7 @@ app.get("/search", withDbClient(async (req, res, dbClient) => {
   const { minLength, maxLength } = parseLengthFilters(req);
 
   const queryRes = await dbClient.query(
-    "SELECT * FROM truths WHERE body ~* $1 AND LENGTH(body) >= $2 AND LENGTH(body) <= $3 ORDER BY RANDOM() LIMIT 1",
+    "SELECT * FROM truths WHERE NOT hidden AND body ~* $1 AND LENGTH(body) >= $2 AND LENGTH(body) <= $3 ORDER BY RANDOM() LIMIT 1",
     [`\\y${searchTerm}\\y`, minLength, maxLength]
   );
 
@@ -151,17 +155,17 @@ app.get("/search", withDbClient(async (req, res, dbClient) => {
 
 app.get("/stats", withDbClient(async (req, res, dbClient) => {
   // Get basic counts
-  const totalRes = await dbClient.query("SELECT COUNT(*) as total FROM truths");
+  const totalRes = await dbClient.query("SELECT COUNT(*) as total FROM truths WHERE NOT hidden");
   const total = parseInt(totalRes.rows[0].total);
 
   // Get length statistics
   const lengthRes = await dbClient.query(
-    "SELECT AVG(LENGTH(body))::int as avg_length, MIN(LENGTH(body)) as min_length, MAX(LENGTH(body)) as max_length FROM truths"
+    "SELECT AVG(LENGTH(body))::int as avg_length, MIN(LENGTH(body)) as min_length, MAX(LENGTH(body)) as max_length FROM truths WHERE NOT hidden"
   );
 
   // Get comments per page
   const pageRes = await dbClient.query(
-    "SELECT page, COUNT(*) as count FROM truths GROUP BY page ORDER BY page"
+    "SELECT page, COUNT(*) as count FROM truths WHERE NOT hidden GROUP BY page ORDER BY page"
   );
 
   // Get most common words (top 20, excluding common words)
@@ -170,6 +174,7 @@ app.get("/stats", withDbClient(async (req, res, dbClient) => {
     FROM (
       SELECT regexp_split_to_table(LOWER(body), E'\\\\s+') as word
       FROM truths
+      WHERE NOT hidden
     ) words
     WHERE LENGTH(word) > 3
       AND word NOT IN ('the', 'and', 'that', 'this', 'with', 'have', 'from', 'they', 'been', 'were', 'your', 'just', 'their', 'than', 'when', 'what', 'about', 'which', 'there', 'would', 'could', 'should')
@@ -180,7 +185,7 @@ app.get("/stats", withDbClient(async (req, res, dbClient) => {
 
   // Get last scrape info (when the newest page was added)
   const lastScrapeRes = await dbClient.query(
-    "SELECT MAX(page) as last_page FROM truths"
+    "SELECT MAX(page) as last_page FROM truths WHERE NOT hidden"
   );
 
   const stats = {
@@ -212,6 +217,7 @@ app.get("/admin", requireAuth, withDbClient(async (req, res, dbClient) => {
   const offset = (page - 1) * limit;
   const search = req.query.search || '';
   const source = SOURCE_LABELS[req.query.source] ? req.query.source : '';
+  const visibility = VISIBILITY_LABELS[req.query.show] ? req.query.show : 'all';
   const sortBy = req.query.sort || 'id';
   const sortOrder = req.query.order || 'desc';
 
@@ -234,6 +240,8 @@ app.get("/admin", requireAuth, withDbClient(async (req, res, dbClient) => {
   }
   if (source === 'arena') conditions.push('source IS NULL');
   if (source === 'steam') conditions.push("source = 'steam'");
+  if (visibility === 'visible') conditions.push('NOT hidden');
+  if (visibility === 'hidden') conditions.push('hidden');
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
   const countRes = await dbClient.query(`SELECT COUNT(*) FROM truths ${where}`, params);
@@ -246,7 +254,9 @@ app.get("/admin", requireAuth, withDbClient(async (req, res, dbClient) => {
       LEFT(body, 200) as body_preview,
       LENGTH(body) as body_length,
       page,
-      source
+      source,
+      hidden,
+      hidden_reason
     FROM truths
     ${where}
     ORDER BY ${sortExpressions[sortColumn]} ${order}, id ${order}
@@ -254,7 +264,7 @@ app.get("/admin", requireAuth, withDbClient(async (req, res, dbClient) => {
   `, [...params, limit, offset]);
 
   const sourceCountsRes = await dbClient.query(
-    "SELECT COUNT(*) FILTER (WHERE source IS NULL)::int AS arena, COUNT(*) FILTER (WHERE source = 'steam')::int AS steam FROM truths"
+    "SELECT COUNT(*) FILTER (WHERE source IS NULL AND NOT hidden)::int AS arena, COUNT(*) FILTER (WHERE source = 'steam' AND NOT hidden)::int AS steam, COUNT(*) FILTER (WHERE hidden)::int AS hidden FROM truths"
   );
 
   res.send(renderAdminPage({
@@ -266,6 +276,7 @@ app.get("/admin", requireAuth, withDbClient(async (req, res, dbClient) => {
     rows: queryRes.rows,
     search,
     source,
+    visibility,
     sourceCounts: sourceCountsRes.rows[0],
     sortBy: sortColumn,
     sortOrder
@@ -275,13 +286,14 @@ app.get("/admin", requireAuth, withDbClient(async (req, res, dbClient) => {
 // ADMIN PAGE TEMPLATE WITH SEARCH AND SORT
 // ============================================================================
 
-function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows, search, source, sourceCounts, sortBy, sortOrder }) {
+function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows, search, source, visibility, sourceCounts, sortBy, sortOrder }) {
   const buildUrl = (params) => {
     const url = new URLSearchParams({
       page: params.page || page,
       limit: params.limit || limit,
       search: params.search !== undefined ? params.search : search,
       source: params.source !== undefined ? params.source : source,
+      show: params.show !== undefined ? params.show : visibility,
       sort: params.sort || sortBy,
       order: params.order || sortOrder
     });
@@ -464,6 +476,9 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
     .source-arena { background: #fdecc8; color: #8a5300; }
     .source-steam { background: #dbeafe; color: #1e40af; }
     .source-other { background: #eee; color: #444; }
+    .source-hidden { background: #fde2e2; color: #9b1c1c; }
+    .hidden-row td { color: #999; }
+    .hidden-reason { display: block; margin-top: 4px; font-size: 12px; color: #9b1c1c; }
     .stat-sources {
       display: flex;
       gap: 8px;
@@ -485,11 +500,11 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
     
     <div class="stats">
       <div class="stat">
-        <div class="stat-label">Total Comments${search || source ? ' (Filtered)' : ''}</div>
+        <div class="stat-label">Total Comments${search || source || visibility !== 'all' ? ' (Filtered)' : ''}</div>
         <div class="stat-value">${totalComments.toLocaleString()}</div>
       </div>
       <div class="stat">
-        <div class="stat-label">By Source</div>
+        <div class="stat-label">In Rotation</div>
         <div class="stat-sources">
           ${Object.entries(SOURCE_LABELS).map(([key, label]) => `
             <a href="${buildUrl({ source: source === key ? '' : key, page: 1 })}"
@@ -497,6 +512,11 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
                title="${source === key ? 'Show all sources' : `Show only ${label}`}">
               ${label} ${(sourceCounts[key] || 0).toLocaleString()}
             </a>`).join('')}
+            <a href="${buildUrl({ show: visibility === 'hidden' ? 'all' : 'hidden', page: 1 })}"
+               class="source-badge source-hidden${visibility === 'hidden' ? ' active' : ''}"
+               title="${visibility === 'hidden' ? 'Show all comments' : 'Show only hidden comments'}">
+              Hidden ${(sourceCounts.hidden || 0).toLocaleString()}
+            </a>
         </div>
       </div>
       <div class="stat">
@@ -525,8 +545,12 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
           ${Object.entries(SOURCE_LABELS).map(([key, label]) =>
             `<option value="${key}"${source === key ? ' selected' : ''}>${label}</option>`).join('')}
         </select>
+        <select name="show" onchange="this.form.submit()" aria-label="Filter by visibility">
+          ${Object.entries(VISIBILITY_LABELS).map(([key, label]) =>
+            `<option value="${key}"${visibility === key ? ' selected' : ''}>${label}</option>`).join('')}
+        </select>
         <button type="submit">Search</button>
-        ${search || source ? `<a href="${buildUrl({ search: '', source: '', page: 1 })}" class="search-bar clear-btn" style="padding: 10px 20px; text-decoration: none; border-radius: 4px; color: white;">Clear</a>` : ''}
+        ${search || source || visibility !== 'all' ? `<a href="${buildUrl({ search: '', source: '', show: 'all', page: 1 })}" class="search-bar clear-btn" style="padding: 10px 20px; text-decoration: none; border-radius: 4px; color: white;">Clear</a>` : ''}
       </form>
     </div>
     
@@ -560,16 +584,16 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
         ${rows.length === 0 ? `
           <tr>
             <td colspan="5" style="text-align: center; padding: 40px; color: #666;">
-              No comments found${search ? ` matching "${escapeHtml(search)}"` : ''}${source ? ` from ${SOURCE_LABELS[source]}` : ''}
+              No comments found${search ? ` matching "${escapeHtml(search)}"` : ''}${source ? ` from ${SOURCE_LABELS[source]}` : ''}${visibility !== 'all' ? ` (${VISIBILITY_LABELS[visibility].toLowerCase()})` : ''}
             </td>
           </tr>
         ` : rows.map(row => `
-          <tr>
+          <tr${row.hidden ? ' class="hidden-row"' : ''}>
             <td class="id-col">${row.id}</td>
             <td class="source-col">${SOURCE_LABELS[sourceKey(row)]
               ? `<span class="source-badge source-${sourceKey(row)}">${SOURCE_LABELS[sourceKey(row)]}</span>`
               : `<span class="source-badge source-other">${escapeHtml(row.source)}</span>`}</td>
-            <td class="body-preview">${highlightMatch(censorText(row.body_preview), search)}${row.body_length > 200 ? '...' : ''}</td>
+            <td class="body-preview">${highlightMatch(censorText(row.body_preview), search)}${row.body_length > 200 ? '...' : ''}${row.hidden ? `<span class="hidden-reason">Hidden — ${escapeHtml(row.hidden_reason || 'no reason recorded')}</span>` : ''}</td>
             <td class="length-col">${row.body_length}</td>
             <td class="page-col">${row.page || '-'}</td>
           </tr>
