@@ -40,6 +40,14 @@ function highlightMatch(text, term) {
   return escaped.replace(new RegExp(escapedTerm, "gi"), (m) => `<span class="highlight">${m}</span>`);
 }
 
+// Where each comment came from: `source` is null for the original feedback-forum
+// scrape and 'steam' for steamScrape.js. Keys double as the admin filter values.
+const SOURCE_LABELS = { arena: "Arena forum", steam: "Steam" };
+
+function sourceKey(row) {
+  return row.source || "arena";
+}
+
 function parseLengthFilters(req) {
   const minLength = parseInt(req.query.min_length) || 1;
   const maxLength = parseInt(req.query.max_length) || 999999;
@@ -203,56 +211,51 @@ app.get("/admin", requireAuth, withDbClient(async (req, res, dbClient) => {
   const limit = parseInt(req.query.limit) || 50;
   const offset = (page - 1) * limit;
   const search = req.query.search || '';
+  const source = SOURCE_LABELS[req.query.source] ? req.query.source : '';
   const sortBy = req.query.sort || 'id';
   const sortOrder = req.query.order || 'desc';
 
-  // Validate sort column to prevent SQL injection
-  const validSortColumns = ['id', 'body_length', 'page'];
-  const sortColumn = validSortColumns.includes(sortBy) ? sortBy : 'id';
+  // Validate sort column to prevent SQL injection; values are fixed expressions.
+  const sortExpressions = {
+    id: 'id',
+    body_length: 'LENGTH(body)',
+    page: 'page',
+    source: "COALESCE(source, 'arena')",
+  };
+  const sortColumn = sortExpressions[sortBy] ? sortBy : 'id';
   const order = sortOrder === 'asc' ? 'ASC' : 'DESC';
 
-  let countQuery, countParams, dataQuery, dataParams;
-
+  // Build the filter once, shared by the count and the page of rows.
+  const conditions = [];
+  const params = [];
   if (search) {
-    // With search filter
-    countQuery = 'SELECT COUNT(*) FROM truths WHERE body ILIKE $1';
-    countParams = [`%${search}%`];
-
-    dataQuery = `
-      SELECT 
-        id, 
-        LEFT(body, 200) as body_preview, 
-        LENGTH(body) as body_length, 
-        page 
-      FROM truths 
-      WHERE body ILIKE $3
-      ORDER BY ${sortColumn === 'body_length' ? 'LENGTH(body)' : sortColumn} ${order}
-      LIMIT $1 OFFSET $2
-    `;
-    dataParams = [limit, offset, `%${search}%`];
-  } else {
-    // Without search filter
-    countQuery = 'SELECT COUNT(*) FROM truths';
-    countParams = [];
-
-    dataQuery = `
-      SELECT 
-        id, 
-        LEFT(body, 200) as body_preview, 
-        LENGTH(body) as body_length, 
-        page 
-      FROM truths 
-      ORDER BY ${sortColumn === 'body_length' ? 'LENGTH(body)' : sortColumn} ${order}
-      LIMIT $1 OFFSET $2
-    `;
-    dataParams = [limit, offset];
+    params.push(`%${search}%`);
+    conditions.push(`body ILIKE $${params.length}`);
   }
+  if (source === 'arena') conditions.push('source IS NULL');
+  if (source === 'steam') conditions.push("source = 'steam'");
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  const countRes = await dbClient.query(countQuery, countParams);
+  const countRes = await dbClient.query(`SELECT COUNT(*) FROM truths ${where}`, params);
   const totalComments = parseInt(countRes.rows[0].count);
   const totalPages = Math.ceil(totalComments / limit);
 
-  const queryRes = await dbClient.query(dataQuery, dataParams);
+  const queryRes = await dbClient.query(`
+    SELECT
+      id,
+      LEFT(body, 200) as body_preview,
+      LENGTH(body) as body_length,
+      page,
+      source
+    FROM truths
+    ${where}
+    ORDER BY ${sortExpressions[sortColumn]} ${order}, id ${order}
+    LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+  `, [...params, limit, offset]);
+
+  const sourceCountsRes = await dbClient.query(
+    "SELECT COUNT(*) FILTER (WHERE source IS NULL)::int AS arena, COUNT(*) FILTER (WHERE source = 'steam')::int AS steam FROM truths"
+  );
 
   res.send(renderAdminPage({
     page,
@@ -262,6 +265,8 @@ app.get("/admin", requireAuth, withDbClient(async (req, res, dbClient) => {
     totalPages,
     rows: queryRes.rows,
     search,
+    source,
+    sourceCounts: sourceCountsRes.rows[0],
     sortBy: sortColumn,
     sortOrder
   }));
@@ -270,12 +275,13 @@ app.get("/admin", requireAuth, withDbClient(async (req, res, dbClient) => {
 // ADMIN PAGE TEMPLATE WITH SEARCH AND SORT
 // ============================================================================
 
-function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows, search, sortBy, sortOrder }) {
+function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows, search, source, sourceCounts, sortBy, sortOrder }) {
   const buildUrl = (params) => {
     const url = new URLSearchParams({
       page: params.page || page,
       limit: params.limit || limit,
       search: params.search !== undefined ? params.search : search,
+      source: params.source !== undefined ? params.source : source,
       sort: params.sort || sortBy,
       order: params.order || sortOrder
     });
@@ -436,8 +442,41 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
       border-color: #2c3e50;
     }
     .id-col { width: 60px; }
+    .source-col { width: 110px; text-align: center; }
     .page-col { width: 80px; text-align: center; }
     .length-col { width: 100px; text-align: center; }
+    .search-bar select {
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+      background: white;
+    }
+    .source-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      text-decoration: none;
+    }
+    .source-arena { background: #fdecc8; color: #8a5300; }
+    .source-steam { background: #dbeafe; color: #1e40af; }
+    .source-other { background: #eee; color: #444; }
+    .stat-sources {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 6px;
+    }
+    .stat-sources .source-badge {
+      font-size: 14px;
+      padding: 4px 10px;
+    }
+    .stat-sources .source-badge.active {
+      outline: 2px solid currentColor;
+    }
   </style>
 </head>
 <body>
@@ -446,8 +485,19 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
     
     <div class="stats">
       <div class="stat">
-        <div class="stat-label">Total Comments${search ? ' (Filtered)' : ''}</div>
+        <div class="stat-label">Total Comments${search || source ? ' (Filtered)' : ''}</div>
         <div class="stat-value">${totalComments.toLocaleString()}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">By Source</div>
+        <div class="stat-sources">
+          ${Object.entries(SOURCE_LABELS).map(([key, label]) => `
+            <a href="${buildUrl({ source: source === key ? '' : key, page: 1 })}"
+               class="source-badge source-${key}${source === key ? ' active' : ''}"
+               title="${source === key ? 'Show all sources' : `Show only ${label}`}">
+              ${label} ${(sourceCounts[key] || 0).toLocaleString()}
+            </a>`).join('')}
+        </div>
       </div>
       <div class="stat">
         <div class="stat-label">Current Page</div>
@@ -470,8 +520,13 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
         <input type="hidden" name="sort" value="${sortBy}">
         <input type="hidden" name="order" value="${sortOrder}">
         <input type="hidden" name="limit" value="${limit}">
+        <select name="source" onchange="this.form.submit()" aria-label="Filter by source">
+          <option value=""${source ? '' : ' selected'}>All sources</option>
+          ${Object.entries(SOURCE_LABELS).map(([key, label]) =>
+            `<option value="${key}"${source === key ? ' selected' : ''}>${label}</option>`).join('')}
+        </select>
         <button type="submit">Search</button>
-        ${search ? `<a href="${buildUrl({ search: '', page: 1 })}" class="search-bar clear-btn" style="padding: 10px 20px; text-decoration: none; border-radius: 4px;">Clear</a>` : ''}
+        ${search || source ? `<a href="${buildUrl({ search: '', source: '', page: 1 })}" class="search-bar clear-btn" style="padding: 10px 20px; text-decoration: none; border-radius: 4px; color: white;">Clear</a>` : ''}
       </form>
     </div>
     
@@ -481,6 +536,11 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
           <th class="id-col">
             <a href="${toggleSort('id')}">
               ID <span class="sort-icon">${sortIcon('id')}</span>
+            </a>
+          </th>
+          <th class="source-col">
+            <a href="${toggleSort('source')}">
+              Source <span class="sort-icon">${sortIcon('source')}</span>
             </a>
           </th>
           <th>Comment Preview</th>
@@ -499,13 +559,16 @@ function renderAdminPage({ page, limit, offset, totalComments, totalPages, rows,
       <tbody>
         ${rows.length === 0 ? `
           <tr>
-            <td colspan="4" style="text-align: center; padding: 40px; color: #666;">
-              No comments found${search ? ` matching "${escapeHtml(search)}"` : ''}
+            <td colspan="5" style="text-align: center; padding: 40px; color: #666;">
+              No comments found${search ? ` matching "${escapeHtml(search)}"` : ''}${source ? ` from ${SOURCE_LABELS[source]}` : ''}
             </td>
           </tr>
         ` : rows.map(row => `
           <tr>
             <td class="id-col">${row.id}</td>
+            <td class="source-col">${SOURCE_LABELS[sourceKey(row)]
+              ? `<span class="source-badge source-${sourceKey(row)}">${SOURCE_LABELS[sourceKey(row)]}</span>`
+              : `<span class="source-badge source-other">${escapeHtml(row.source)}</span>`}</td>
             <td class="body-preview">${highlightMatch(censorText(row.body_preview), search)}${row.body_length > 200 ? '...' : ''}</td>
             <td class="length-col">${row.body_length}</td>
             <td class="page-col">${row.page || '-'}</td>
