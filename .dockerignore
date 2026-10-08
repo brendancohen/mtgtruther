@@ -3,3 +3,7 @@ Dockerfile
 .dockerignore
 node_modules
 .git
+
+# raw scrape review output
+steam-review.json
+steam-review.md

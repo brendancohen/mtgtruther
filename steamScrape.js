@@ -5,12 +5,15 @@
 //   node steamScrape.js                dry run: scrape, write steam-review.json + .md
 //   node steamScrape.js --reclassify   re-run the filter over the cached scrape
 //   node steamScrape.js --insert       insert the reviewed steam-review.json into the DB
+//   node steamScrape.js --auto         scrape and insert new comments unattended
 //
 // The insert step reads the cached review file rather than re-scraping, so what
-// gets stored is exactly what was reviewed.
+// gets stored is exactly what was reviewed. --auto is what the scheduled Fly
+// Machine runs; it refuses to insert anything if a run looks implausible.
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const cheerio = require("cheerio");
 const pgFormat = require("pg-format");
 const { censorText } = require("./censor");
@@ -19,7 +22,13 @@ const APP_ID = 2141910;
 const FORUM = `https://steamcommunity.com/app/${APP_ID}/discussions`;
 const QUERIES = ["shuffler", "rigged", "shuffle", "mana screw", "land flood"];
 const SEARCH_PAGES = 3;
+// Search ranks by relevance, so also sweep the most recently active topics to
+// catch new threads; the per-post filter decides what's on-theme.
+const RECENT_PAGES = 2;
 const MAX_THREAD_PAGES = 20;
+// More new posts than this in one unattended run suggests a broken filter or a
+// Steam layout change rather than real activity, so --auto inserts nothing.
+const MAX_NEW_PER_RUN = Number(process.env.STEAM_MAX_NEW) || 100;
 const DELAY_MS = 1500;
 const UA = "mtgtruther/0.2 (+https://github.com/brendancohen/mtgtruther)";
 
@@ -92,24 +101,37 @@ function classify(text) {
 }
 
 async function discoverThreads() {
-  const threads = new Map();
-  for (const query of QUERIES) {
-    for (let page = 1; page <= SEARCH_PAGES; page++) {
-      const url = `${FORUM}/search/?q=${encodeURIComponent(query)}&gidforum=0&p=${page}`;
+  const threads = new Set();
+  const collectLinks = async (url) => {
+    try {
       const $ = await getPage(url);
       let found = 0;
       $("a[href*='/discussions/0/']").each((_, a) => {
         const match = ($(a).attr("href") || "").match(/\/discussions\/0\/(\d+)/);
         if (match) {
           found++;
-          threads.set(match[1], true);
+          threads.add(match[1]);
         }
       });
+      return found;
+    } catch (e) {
+      console.error(`Discovery page failed: ${e.message}`);
+      return 0;
+    } finally {
       await sleep(DELAY_MS);
+    }
+  };
+
+  for (const query of QUERIES) {
+    for (let page = 1; page <= SEARCH_PAGES; page++) {
+      const found = await collectLinks(`${FORUM}/search/?q=${encodeURIComponent(query)}&gidforum=0&p=${page}`);
       if (found === 0) break;
     }
   }
-  return [...threads.keys()];
+  for (let page = 1; page <= RECENT_PAGES; page++) {
+    await collectLinks(`${FORUM}/0/?fp=${page}`);
+  }
+  return [...threads];
 }
 
 async function scrapeThread(threadId) {
@@ -146,15 +168,20 @@ async function scrapeThread(threadId) {
   return { title, posts };
 }
 
-async function dryRun() {
+// Discover, scrape and filter. Shared by the dry run and --auto.
+async function collect() {
   console.log("Discovering threads...");
   const threadIds = await discoverThreads();
   console.log(`Found ${threadIds.length} threads.`);
+  if (threadIds.length === 0) {
+    throw new Error("Discovered 0 threads; Steam's forum markup may have changed.");
+  }
 
   const kept = [];
   const dropped = [];
   const seen = new Set();
   let raw = 0;
+  let failed = 0;
 
   for (const [i, threadId] of threadIds.entries()) {
     try {
@@ -170,11 +197,56 @@ async function dryRun() {
       }
       console.log(`[${i + 1}/${threadIds.length}] ${posts.length} posts — ${title.slice(0, 60)}`);
     } catch (e) {
+      failed++;
       console.error(`Thread ${threadId} failed: ${e.message}`);
     }
   }
 
-  writeReview({ threads: threadIds.length, raw, unique: seen.size }, kept, dropped);
+  if (raw === 0) {
+    throw new Error(`Scraped 0 posts from ${threadIds.length} threads (${failed} failed); Steam's markup may have changed.`);
+  }
+  return { stats: { threads: threadIds.length, failed, raw, unique: seen.size }, kept, dropped };
+}
+
+async function dryRun() {
+  const { stats, kept, dropped } = await collect();
+  writeReview(stats, kept, dropped);
+}
+
+// Unattended mode for the scheduled Machine: scrape, then insert only posts that
+// aren't already stored, refusing implausibly large batches.
+async function auto() {
+  const startedAt = Date.now();
+  const { stats, kept } = await collect();
+
+  const dbPool = require("./dbPool");
+  const client = await dbPool.connect();
+  try {
+    await ensureSourceColumn(client);
+
+    // body_hash is md5(body) in Postgres, which hashes the same UTF-8 bytes as this.
+    const hashes = kept.map((k) => crypto.createHash("md5").update(k.text).digest("hex"));
+    const { rows } = await client.query("SELECT body_hash FROM truths WHERE body_hash = ANY($1)", [hashes]);
+    const existing = new Set(rows.map((r) => r.body_hash));
+    const fresh = kept.filter((_, i) => !existing.has(hashes[i]));
+
+    if (fresh.length > MAX_NEW_PER_RUN) {
+      throw new Error(
+        `${fresh.length} new posts exceeds the per-run limit of ${MAX_NEW_PER_RUN}; inserted nothing. ` +
+          "Review with a dry run, or raise STEAM_MAX_NEW for a one-off catch-up."
+      );
+    }
+
+    const ids = await insertRows(client, fresh);
+    const range = ids.length ? `, ids ${Math.min(...ids)}-${Math.max(...ids)}` : "";
+    console.log(
+      `Steam auto run: ${stats.threads} threads (${stats.failed} failed), ${stats.raw} posts, ` +
+        `${kept.length} on-theme, ${ids.length} new inserted${range} in ${Math.round((Date.now() - startedAt) / 1000)}s.`
+    );
+  } finally {
+    client.release();
+    await dbPool.end();
+  }
 }
 
 // Re-run the filter over the cached scrape, so it can be tuned without hitting Steam.
@@ -238,44 +310,55 @@ async function insert() {
   const dbPool = require("./dbPool");
   const client = await dbPool.connect();
   try {
-    // Postgres checks table ownership before IF NOT EXISTS, so only attempt the ALTER
-    // when the column is actually missing; the app role usually can't run it.
-    const { rowCount: hasSource } = await client.query(
-      "SELECT 1 FROM information_schema.columns WHERE table_name = 'truths' AND column_name = 'source'"
-    );
-    if (!hasSource) {
-      try {
-        await client.query("ALTER TABLE truths ADD COLUMN source text");
-      } catch (e) {
-        if (e.code === "42501") {
-          throw new Error("truths has no `source` column and this role can't add it; run as the table owner: ALTER TABLE truths ADD COLUMN source text;");
-        }
-        throw e;
-      }
-    }
-    let inserted = 0;
-    for (let i = 0; i < kept.length; i += 200) {
-      const rows = kept.slice(i, i + 200).map((k) => [k.text, toHtml(k.text), null, "steam"]);
-      const res = await client.query(
-        pgFormat(
-          "INSERT INTO truths (body, bodyhtml, page, source) VALUES %L ON CONFLICT (body_hash) DO NOTHING",
-          rows
-        )
-      );
-      inserted += res.rowCount;
-    }
-    console.log(`Inserted ${inserted} of ${kept.length} kept comments (rest were duplicates).`);
+    await ensureSourceColumn(client);
+    const ids = await insertRows(client, kept);
+    console.log(`Inserted ${ids.length} of ${kept.length} kept comments (rest were duplicates).`);
   } finally {
     client.release();
     await dbPool.end();
   }
 }
 
-const mode = process.argv.includes("--insert")
-  ? insert
-  : process.argv.includes("--reclassify")
-    ? async () => reclassify()
-    : dryRun;
+// Postgres checks table ownership before IF NOT EXISTS, so only attempt the ALTER
+// when the column is actually missing; the app role usually can't run it.
+async function ensureSourceColumn(client) {
+  const { rowCount: hasSource } = await client.query(
+    "SELECT 1 FROM information_schema.columns WHERE table_name = 'truths' AND column_name = 'source'"
+  );
+  if (hasSource) return;
+  try {
+    await client.query("ALTER TABLE truths ADD COLUMN source text");
+  } catch (e) {
+    if (e.code === "42501") {
+      throw new Error("truths has no `source` column and this role can't add it; run as the table owner: ALTER TABLE truths ADD COLUMN source text;");
+    }
+    throw e;
+  }
+}
+
+// Insert posts as Steam rows, skipping any already stored. Returns the new ids.
+async function insertRows(client, entries) {
+  const ids = [];
+  for (let i = 0; i < entries.length; i += 200) {
+    const rows = entries.slice(i, i + 200).map((k) => [k.text, toHtml(k.text), null, "steam"]);
+    const res = await client.query(
+      pgFormat(
+        "INSERT INTO truths (body, bodyhtml, page, source) VALUES %L ON CONFLICT (body_hash) DO NOTHING RETURNING id",
+        rows
+      )
+    );
+    ids.push(...res.rows.map((r) => r.id));
+  }
+  return ids;
+}
+
+const mode = process.argv.includes("--auto")
+  ? auto
+  : process.argv.includes("--insert")
+    ? insert
+    : process.argv.includes("--reclassify")
+      ? async () => reclassify()
+      : dryRun;
 
 mode().catch((e) => {
   console.error(e);
